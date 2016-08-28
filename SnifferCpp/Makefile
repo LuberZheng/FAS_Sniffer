@@ -1,5 +1,5 @@
 CXX = g++
-CXXFLAGS = -I../FAS --std=c++14 -Wall -W -Os
+CXXFLAGS = -I../FAS --std=c++11 -Wall -W -Os
 LDLIBS = -L../FAS -lVadDetector -lpcap -lpcre -lpthread -lboost_system -lrt
 
 
