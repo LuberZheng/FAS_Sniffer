@@ -1,15 +1,14 @@
 CXX = g++
-CXXFLAGS = -I../FAS --std=c++14 -Wall -W -Os
-LDLIBS = -L../FAS -lVadDetector -lpcap -lpcre -lpthread -lboost_system -lrt
+CXXFLAGS = -I../FAS -I../install/include --std=c++14 -Wall -W -Os
+LDLIBS = -L../FAS -lVadDetector -L../install/lib -lavformat -lavcodec -lm -lz -ldl -lavutil -lavfilter -lswresample -lswscale -lpcap -lpcre -lpthread -lboost_system -lpq -lrt -ldl
 
 
 all: rtp_sniffer
 
 
-rtp_sniffer: main.o call.o rtp_media_stream.o rtp_media_stream_processing.o sip_header.o sip_header_processing.o network_packet.o network_packet_pool.o process_assembler.o process_capture.o process_flusher.o process_worker.o rtp_metadata.o sip_metadata.o media_frame.o \
-	           voice_activity_detector.o
+rtp_sniffer: main.o call.o rtp_media_stream.o rtp_media_stream_processing.o sip_header.o sip_header_processing.o network_packet.o network_packet_pool.o process_assembler.o process_capture.o process_flusher.o process_worker.o rtp_metadata.o sip_metadata.o media_frame.o postgress.o
 	$(CXX) $(CXXFLAGS) *.o -o rtp_sniffer $(LDLIBS)
-	rm -Rf *.o
+	#rm -Rf *.o
 
 
 main.o: main.cpp
@@ -70,9 +69,6 @@ sip_metadata.o: sip_metadata.cpp
 
 media_frame.o: media_frame.cpp
 	$(CXX) $(CXXFLAGS) -c media_frame.cpp
-
-voice_activity_detector.o: voice_activity_detector.cpp
-	$(CXX) $(CXXFLAGS) -c voice_activity_detector.cpp
 
 clean:
 	rm -Rf rtp_sniffer *.o

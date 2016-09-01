@@ -149,6 +149,7 @@ void start_capture(std::string filter_options, std::string device_name = "")
     bpf_u_int32 mask;
     bpf_u_int32 net;
 
+    std::cerr << "Calling start_capture" << std::endl;
 
     if (device_name.length()) {
         dev = &device_name.at(0);

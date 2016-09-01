@@ -10,8 +10,20 @@
 #include "process_flusher.hpp"
 #include "process_worker.hpp"
 #include "sip_header_processing.hpp"
+#include "postgress.hpp"
 
+#ifdef __cplusplus
+extern "C"
+{
+#endif
 
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libswresample/swresample.h>
+								
+#ifdef __cplusplus
+};
+#endif
 
 using boost::interprocess::create_only;
 using boost::interprocess::offset_t;
@@ -28,7 +40,7 @@ uint32_t CONFIG_RTP_DESTINATION_DIRECTORY_MAXSIZE      = 1024; // in mb
 uint32_t CONFIG_SIP_DESTINATION_DIRECTORY_MAXSIZE      = 512; // in mb
 uint32_t CONFIG_RTP_DESTINATION_DIRECTORY_MAX_FILE_CNT = 10240; // maximum files in directory
 uint32_t CONFIG_SIP_DESTINATION_DIRECTORY_MAX_FILE_CNT = 102400; // maximum files in directory
-uint16_t CONFIG_WORKING_PROCESSES                      = 10; // number of workers
+uint16_t CONFIG_WORKING_PROCESSES                      = 1; // number of workers
 uint16_t CONFIG_STREAM_TIMEOUT                         = 30; // in seconds
 uint16_t CONFIG_SIP_HEADER_TIMEOUT                     = 3; // in minutes
 uint16_t CONFIG_DISPATCHER_TIMEOUT                     = 5; // in seconds
@@ -246,7 +258,9 @@ template<typename Func>
 void launch_process(Func func)
 {
     uint16_t pid = fork();
+    printf("pid=%d\n",pid);
     if (!pid) {
+        printf("push pid=%d\n",pid);
         process_pid_storage.push_back(pid);
     } else {
         func();
@@ -257,6 +271,14 @@ void launch_process(Func func)
 
 int main(int argc, char** argv)
 {
+    PGconn* conn = postgress_connect();
+    /*if(conn)
+    {
+        add_record(conn,"2016-09-01", "111",1);
+        add_record(conn,"2016-09-02", "222",1);
+        GetAllRecords(conn,"vad_result");
+    }*/
+
     parse_arguments(argc, argv);
     show_config();
 
@@ -272,6 +294,7 @@ int main(int argc, char** argv)
     for (uint16_t i = 0; i < CONFIG_WORKING_PROCESSES; ++i) {
         launch_process(process_worker);
     }
+    printf("process_worker lauched\n");
     // launch capture process
     launch_process(process_capture);
     // launch assemble process

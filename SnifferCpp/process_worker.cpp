@@ -9,7 +9,6 @@
 #include "sip_header_processing.hpp"
 
 
-
 using boost::interprocess::interprocess_mutex;
 using boost::interprocess::scoped_lock;
 using boost::interprocess::try_to_lock;
@@ -22,12 +21,46 @@ extern bool CONFIG_MODE_DUMP_SIP_HEADERS;
 namespace worker {
 
 
+
 uint32_t current_packet_cnt = 0;
 uint16_t current_segment_cnt = 0;
 struct shared_memory_segment* current_segment;
 static std::deque<struct shared_memory_segment*> segments;
 scoped_lock<interprocess_mutex> segment_lock;
 
+void set_decode_context(decode_context *ctx,AVCodecID codec_id)
+{
+    if(ctx->c)
+    {
+        avcodec_free_context(&ctx->c);
+        av_free(ctx->c);
+    }
+    if(ctx->decoded_frame)
+        av_frame_free(&ctx->decoded_frame);
+
+    av_init_packet(&ctx->avpkt);
+    ctx->codec = avcodec_find_decoder(codec_id);
+    if (!ctx->codec) {
+        fprintf(stderr,"Codec not found\n");
+        return;
+    }
+
+    ctx->c = avcodec_alloc_context3(ctx->codec);
+    if (!ctx->c) {
+        fprintf(stderr, "Could not allocate audio codec context\n");
+        return;
+    }
+
+    ctx->c->channels = 1;
+    ctx->c->sample_fmt = AV_SAMPLE_FMT_S16;
+    /* open it */
+    if (avcodec_open2(ctx->c, ctx->codec, NULL) < 0) {
+        fprintf(stderr, "Could not open codec\n");
+        return;
+    }
+    av_frame_free(&ctx->decoded_frame);
+    ctx->decoded_frame = NULL;
+}
 
 void acquire_segment()
 {
@@ -84,18 +117,18 @@ void release_segment()
 
 //----------------------------------------------------------------------
 
-void process_segment()
+void process_segment(decode_context *ctx)
 {
     for (uint32_t i = 0; i < current_segment->data.size(); ++i) {
         auto& packet = current_segment->data.at(i);
 
-        analyze(packet);
+        analyze(packet,ctx);
     }
 }
 
 //----------------------------------------------------------------------
 
-void analyze(NetworkPacket& packet)
+void analyze(NetworkPacket& packet, decode_context *ctx)
 {
     uint8_t* ip_packet_ptr = packet.data() + ETHERNET_HEADER_LEN;
     uint16_t ip_packet_len = packet.size() - ETHERNET_HEADER_LEN;
@@ -139,7 +172,7 @@ void analyze(NetworkPacket& packet)
         analyze_sip_header(packet, payload_ptr, payload_len);
     } else {
         if (CONFIG_MODE_DUMP_RTP_STREAMS) {
-            analyze_rtp_header(packet, payload_ptr, payload_len);
+            analyze_rtp_header(packet, payload_ptr, payload_len, ctx);
         }
     }
 }
@@ -173,33 +206,111 @@ void analyze_sip_header(NetworkPacket& packet, const uint8_t* payload_ptr, uint1
     packet.set_proto_unknown();
 }
 
+
+void decode_audio(decode_context *ctx)
+{
+    int len = 0;
+    while (ctx->avpkt.size > 0) {
+        int i, ch;
+        int got_frame = 0;
+
+        if (!ctx->decoded_frame) {
+            if (!(ctx->decoded_frame = av_frame_alloc())) 
+            {
+                fprintf(stderr, "Could not allocate audio frame\n");
+                break;
+            }
+        }
+
+        len = avcodec_decode_audio4(ctx->c, ctx->decoded_frame, &got_frame, &ctx->avpkt);
+        if (len < 0) {
+            fprintf(stderr, "Error while decoding\n");
+            break;
+        }
+
+        if (got_frame) {
+            /* if a frame has been decoded, output it */
+            int data_size = av_get_bytes_per_sample(ctx->c->sample_fmt);
+            if (data_size < 0) {
+                /* This should not occur, checking just for paranoia */
+                fprintf(stderr, "Failed to calculate data size\n");
+                break;
+            }
+            for (i=0; i<ctx->decoded_frame->nb_samples; i++)
+                for (ch=0; ch<ctx->c->channels; ch++)
+                {
+                    //fwrite(decoded_frame->data[ch] + data_size*i, 1, data_size, outfile);
+                    printf("ch%d datasize=%d\b",ch, data_size);
+                    if(data_size >= 240*2)
+                    {
+                        bool vad = ctx->vad->process((char*)(ctx->decoded_frame->data[ch] + data_size*i));
+                        if(vad)
+                            printf("voice\n");
+                        else
+                            printf("non voice\n");
+                    }
+                }
+        }
+        ctx->avpkt.size -= len;
+        ctx->avpkt.data += len;
+        ctx->avpkt.dts =
+        ctx->avpkt.pts = AV_NOPTS_VALUE;
+    }
+}
 //----------------------------------------------------------------------
 
-void analyze_rtp_header(NetworkPacket& packet, const uint8_t* payload_ptr, uint16_t payload_len)
+void analyze_rtp_header(NetworkPacket& packet, const uint8_t* payload_ptr, uint16_t payload_len, decode_context *ctx)
 {
     auto hdr = reinterpret_cast<const struct rtp_header*>(payload_ptr);
-
+    fprintf(stderr,"analyze_rtp_header called\n");
     if (is_protocol_RTP(hdr, payload_len) && is_rtp_payload_type_allowed(hdr)) {
         auto hdr_len = get_rtp_header_len(hdr);
 
         const uint8_t* media_payload_ptr = payload_ptr + hdr_len;
         uint16_t media_payload_len = payload_len - hdr_len;
-
+        uint8_t payload_type;
+        AVCodecID codec_type;
 
         auto meta = packet.rtp_meta();
+        
+        payload_type = get_rtp_payload_type(hdr);
+        switch(payload_type)
+        {
+            case (int)Codec::g711U:
+                codec_type = AV_CODEC_ID_PCM_MULAW;
+                break;
+            case (int)Codec::g723:
+                codec_type = AV_CODEC_ID_G723_1;
+                break;
+            case (int)Codec::g711A:
+                codec_type = AV_CODEC_ID_PCM_ALAW;
+                break;
+            case (int)Codec::g729:
+                codec_type = AV_CODEC_ID_G729;
+                break;
+            default:
+                codec_type = AV_CODEC_ID_NONE;
+        }
+        
+        if(codec_type != ctx->codec_id)
+            set_decode_context(ctx,codec_type);
 
         meta->set_id(ntohl(hdr->sync_identifier));
         meta->set_sport(packet.sport());
         meta->set_dport(packet.dport());
         meta->set_sequence_number(ntohs(hdr->sequence_number));
-        meta->set_codec(static_cast<Codec>(get_rtp_payload_type(hdr)));
+        meta->set_codec(static_cast<Codec>(payload_type));
         meta->set_payload_ptr(media_payload_ptr);
         meta->set_payload_len(media_payload_len);
 
         packet.set_proto_rtp();
+
+        ctx->avpkt.data = (uint8_t *)media_payload_ptr;
+        ctx->avpkt.size = media_payload_len;
+
+        decode_audio(ctx);
         return;
     }
-
     packet.set_proto_unknown();
 }
 
@@ -210,7 +321,9 @@ void analyze_rtp_header(NetworkPacket& packet, const uint8_t* payload_ptr, uint1
 void process_worker()
 {
     using namespace worker;
-
+    decode_context ctx;
+    
+    memset(&ctx,0,sizeof(ctx));
     std::cout << __func__ << " " << getpid() << std::endl;
 
     // wait for all processes to be started
@@ -220,10 +333,14 @@ void process_worker()
     if (segments.empty()) {
         exit_nicely();
     }
+    
+    ctx.vad = new VadDetector(240,8000);
+    av_register_all();
+    avformat_network_init();
 
     while (true) {
         acquire_segment();
-        process_segment();
+        process_segment(&ctx);
         release_segment();
     }
 }
